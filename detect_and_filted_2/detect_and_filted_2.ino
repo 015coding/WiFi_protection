@@ -5,29 +5,29 @@
 #include <SPI.h>
 #include <MFRC522.h>
 
-#define SS_PIN 5        // ESP32 GPIO for RC522 SDA
-#define RST_PIN 22      // ESP32 GPIO for RC522 RST
-#define BUZZER_PIN 3   // Changed from GPIO3 to GPIO21
+#define SS_PIN 5        // RC522 SDA (Chip Select)
+#define RST_PIN 22      // RC522 Reset
+#define BUZZER_PIN 15   // Buzzer GPIO (Changed from GPIO 36)
 
-// Custom SPI pins (if using GPIO 9 & 10)
-#define SCK_PIN 18    
-#define MOSI_PIN 9    
-#define MISO_PIN 10  
+// Updated SPI Pins (Safe for ESP32-S3)
+#define SCK_PIN 18      // SPI Clock
+#define MOSI_PIN 11     // SPI MOSI (Changed from GPIO 21)
+#define MISO_PIN 13     // SPI MISO (Changed from GPIO 19)
 
-// Target UID for the "admin" card
+// Admin Card UID (Replace with your own)
 MFRC522 rfid(SS_PIN, RST_PIN);
-byte adminUID[] = {0x13, 0xAE, 0x23, 0x28};  // Replace with your desired admin UID
+byte adminUID[] = {0x13, 0xAE, 0x23, 0x28};  
 
-// Configuration
-const char* ssid = "IOT-KU";    // Fake AP SSID
-const int channel = 6;          // AP channel
-const int maxConnections = 4;   // Max allowed connections
+// Wi-Fi Configuration
+const char* ssid = "IOT-KU";
+const int channel = 6;
+const int maxConnections = 4;
 
 // Modes
-enum Mode { OFF, ADD_NEW_MAC, FILTERED_DETECT, OPEN_AP };
+enum Mode { OFF, ADD_NEW_MAC, FILTERED_DETECT };
 Mode currentMode = FILTERED_DETECT;
 
-// Store MAC addresses
+// MAC Address Storage
 std::vector<String> trustedMACs;
 std::vector<String> knownDevices;
 
@@ -39,7 +39,7 @@ String macToString(const uint8_t* mac) {
   return String(macStr);
 }
 
-// Add MAC to whitelist
+// Add Trusted MAC
 void addTrustedMAC(String mac) {
   if (std::find(trustedMACs.begin(), trustedMACs.end(), mac) == trustedMACs.end()) {
     trustedMACs.push_back(mac);
@@ -49,7 +49,7 @@ void addTrustedMAC(String mac) {
   }
 }
 
-// Handle new connection
+// Handle New Connection
 void onConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
   wifi_event_ap_staconnected_t* connected = (wifi_event_ap_staconnected_t*)&info;
   String mac = macToString(connected->mac);
@@ -65,14 +65,14 @@ void onConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (currentMode == FILTERED_DETECT && 
         std::find(trustedMACs.begin(), trustedMACs.end(), mac) == trustedMACs.end()) {
       Serial.println("❌ Unauthorized MAC detected! Disconnecting...");
-      esp_wifi_disconnect();  // Disconnect unknown MAC
+      esp_wifi_disconnect();
     } else {
       Serial.println("✅ Connection allowed.");
     }
   }
 }
 
-// Handle disconnection
+// Handle Disconnection
 void onDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
   wifi_event_ap_stadisconnected_t* disconnected = (wifi_event_ap_stadisconnected_t*)&info;
   String mac = macToString(disconnected->mac);
@@ -108,7 +108,6 @@ void switchMode(int mode) {
   switch (currentMode) {
     case OFF:
       Serial.println("\n🚫 Mode: OFF (AP disabled)");
-      stopFakeAP();
       break;
     case ADD_NEW_MAC:
       Serial.println("\n📡 Mode: ADD NEW MAC (Open AP, add devices to whitelist)");
@@ -118,13 +117,10 @@ void switchMode(int mode) {
       Serial.println("\n🔒 Mode: FILTERED DETECT (Only trusted MACs allowed)");
       startFakeAP();
       break;
-    // case OPEN_AP:
-    //   startFakeAP();
-    //   break;
   }
 }
 
-// Check if the card is admin
+// Check Admin Card
 bool isAdminCard(byte *uid, byte size) {
   if (size != sizeof(adminUID)) {
     return false;
@@ -137,23 +133,14 @@ bool isAdminCard(byte *uid, byte size) {
   return true;
 }
 
-// Activate buzzer for unauthorized access
-void activateBuzzer_alert() {
+// Activate Buzzer
+void activateBuzzer(bool isAdmin) {
+  int beepDuration = isAdmin ? 300 : 1000;
   for (int i = 0; i < 2; i++) {
     digitalWrite(BUZZER_PIN, HIGH);
-    delay(3000);
+    delay(beepDuration);
     digitalWrite(BUZZER_PIN, LOW);
-    delay(500);
-  }
-}
-
-// Activate buzzer for admin access
-void activateBuzzer_admin() {
-  for (int i = 0; i < 2; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
     delay(300);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(200);
   }
 }
 
@@ -161,18 +148,27 @@ void activateBuzzer_admin() {
 void setup() {
   Serial.begin(115200);
   Serial.println("\n🔄 Enter mode (0=OFF, 1=ADD_NEW_MAC, 2=FILTERED_DETECT):");
+
+  // Disable Wi-Fi before SPI Init (Avoid conflict)
+  WiFi.mode(WIFI_OFF);
+  delay(500);
+
+  // Initialize SPI and RFID
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
+  rfid.PCD_Init();
+
+  // Re-enable Wi-Fi after SPI init
   WiFi.mode(WIFI_AP);
   switchMode(currentMode);
 
-  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
-  rfid.PCD_Init();
-  Serial.println("RC522 RFID Reader Ready!");
-
+  // Buzzer Setup
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
+
+  Serial.println("✅ System Ready!");
 }
 
-// Loop: Check for mode change & RFID scanning
+// Main Loop
 void loop() {
   if (Serial.available()) {
     int mode = Serial.parseInt();
@@ -184,22 +180,24 @@ void loop() {
     }
   }
 
-  // Check for RFID card
+  // Check for RFID Card
   if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+    delay(100);  // Prevent watchdog reset by adding delay
     return;
   }
 
-  Serial.println("\nCard detected!");
-  
+  Serial.println("\n🎫 Card detected!");
+
   if (isAdminCard(rfid.uid.uidByte, rfid.uid.size)) {
-    Serial.println("Admin detected!");
-    activateBuzzer_admin();
-    switchMode(0);
+    Serial.println("🔑 Admin detected! Turning off AP...");
+    activateBuzzer(true);
+    switchMode(OFF);
   } else {
-    Serial.println("Unknown card! Activating buzzer...");
-    activateBuzzer_alert();
+    Serial.println("❌ Unknown card! Activating alert...");
+    activateBuzzer(false);
   }
 
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
+  delay(100);  // Ensure watchdog timer resets
 }
